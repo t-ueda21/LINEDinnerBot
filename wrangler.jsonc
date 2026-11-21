@@ -1,0 +1,15 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "line-dinner-bot",
+  "main": "src/worker.ts",
+  "compatibility_date": "2026-11-19",
+  "preview_urls": false,
+  "triggers": { "crons": ["*/5 * * * *"] },
+  "d1_databases": [{
+    "binding": "DB",
+    "database_name": "line-dinner-bot",
+    "database_id": "00000000-0000-0000-0000-000000000001"
+  }],
+  "images": { "binding": "IMAGES" },
+  "observability": { "enabled": false }
+}

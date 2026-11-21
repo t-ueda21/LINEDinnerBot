@@ -1,0 +1,16 @@
+node_modules/
+dist/
+.wrangler/
+.dev.vars*
+.env*
+*.backup.json
+*.sqlite3
+*.sqlite3-*
+/.compass/
+/.vscode/
+/AGENTS.md
+/docs/superpowers/
+/docs/release-runbook.md
+/docs/unit-testing.md
+/docs/integration-testing.md
+/docs/system-testing.md
