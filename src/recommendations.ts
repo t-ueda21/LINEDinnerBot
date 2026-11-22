@@ -53,6 +53,8 @@ const catalogue = [
   ['豚の生姜焼き','千切りキャベツ'], ['野菜カレー','グリーンサラダ'], ['鶏と大根の煮物','小松菜のごま和え'],
   ['焼きうどん','豆腐のみそ汁'], ['肉じゃが','トマトサラダ'], ['厚揚げと野菜の炒め物','卵スープ'],
 ];
+const aiDishTaxonomy = new Map(catalogue.flat().map(name => [dishKey(name), name] as const));
+aiDishTaxonomy.set(dishKey('カレー'), '野菜カレー');
 
 function fallback(snapshot: Snapshot, target: string) {
   const choices = catalogue.map(([main, side], order) => ({
@@ -68,17 +70,21 @@ function fallback(snapshot: Snapshot, target: string) {
   return { rev: snapshot.rev, text: `${target}の晩ごはん（簡易案）\n${context}\n${lines.join('\n')}` };
 }
 
-// Explicit identifiers in free-form labels are excluded before the API call.
-const allowedForAi = (label: string) => !/[@＠]|https?:|\d{3,}|(?:さん|様|くん|ちゃん)|[\p{Cc}\p{Cf}]/iu.test(label);
+// Only application-owned canonical labels cross the external AI boundary.
+const canonicalAiDish = (label: string) => aiDishTaxonomy.get(dishKey(label));
+const validAiOutputLabel = (label: string) =>
+  !/[@＠]|https?:|\d{3,}|(?:さん|様|くん|ちゃん)|[\p{Cc}\p{Cf}]/iu.test(label);
 
 function aiFacts(snapshot: Snapshot, date: string, target: string) {
   const facts: Record<string, Occurrence | string> = {};
   for (const recent of snapshot.meals.filter(meal => meal.date >= shiftDate(date, -2))) {
-    if (allowedForAi(recent.dishes[0])) facts['recent-' + recent.date] = recent.dishes[0];
+    const name = canonicalAiDish(recent.dishes[0]);
+    if (name) facts['recent-' + recent.date] = name;
   }
   for (const value of top(snapshot)) {
-    if (!allowedForAi(value.name)) continue;
-    facts['freq-' + Object.keys(facts).length] = value;
+    const name = canonicalAiDish(value.name);
+    if (!name) continue;
+    facts['freq-' + Object.keys(facts).length] = { ...value, name };
     if (new TextEncoder().encode(JSON.stringify({ target, date, recordedDays: snapshot.meals.length, facts })).length > 4096) {
       delete facts[Object.keys(facts).at(-1)!];
       break;
@@ -101,7 +107,7 @@ function validCandidates(result: unknown, data: ReturnType<typeof aiFacts>, snap
   if (!candidates || !Array.isArray(candidates) || candidates.length < 2 || candidates.length > 3) return null;
   const found = new Set<string>();
   const validDish = (dish: unknown) => typeof dish === 'string' && !!dish.trim() && [...dish].length <= 60 &&
-    allowedForAi(dish);
+    validAiOutputLabel(dish);
   for (const item of candidates) {
     const candidate = item as Candidate | null;
     if (!candidate || !validDish(candidate.main) || (candidate.side !== null && !validDish(candidate.side)) ||
@@ -134,6 +140,7 @@ export async function recommend(env: Env, runtime: Runtime, group: Group, date: 
   const snapshot = await readHistory(env, group, date, today);
   if (!snapshot.meals.length || !available(group, env, 'recommendation', runtime.now())) return fallback(snapshot, target);
   const facts = aiFacts(snapshot, date, target);
+  if (!Object.keys(facts.facts).length) return fallback(snapshot, target);
   const cache = await env.DB.prepare(`SELECT candidates_json FROM recommendation_cache WHERE group_id=? AND target_date=?
     AND history_rev=? AND epoch=? AND expires_at_ms>?`)
     .bind(group.group_id, target, snapshot.rev, group.epoch, runtime.now()).first<{ candidates_json: string }>();
