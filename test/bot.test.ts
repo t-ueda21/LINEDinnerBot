@@ -131,6 +131,25 @@ test('履歴を集計し AI 無効時は履歴に基づく簡易案を返す', a
   assert.ok(bot.outbound.every(call => call.url.includes('api.line.me')));
 });
 
+test('今日と明日の献立は月末でも対象日を分けて短く返信する', async () => {
+  const bot = fixture();
+  const monthEnd = Date.parse('2026-11-30T23:00:00+09:00');
+  await bot.post([{ ...message('meal', '晩ごはん 2026-11-29 カレー'), timestamp: monthEnd }], undefined, monthEnd + 100);
+  await bot.post([
+    { ...message('today', '　今日の献立　'), timestamp: monthEnd + 200 },
+    { ...message('tomorrow', '明日の献立'), timestamp: monthEnd + 200 },
+  ], undefined, monthEnd + 300);
+
+  for (const [id, date] of [['today', '2026-11-30'], ['tomorrow', '2026-12-01']]) {
+    const lines = bot.outbound.find(call => call.body?.replyToken === 'reply-' + id)?.body.messages[0].text.split('\n');
+    assert.ok(lines, id + ' の提案がない');
+    assert.equal(lines[0], `${date}の晩ごはん（簡易案）`);
+    assert.equal(lines.length, 5);
+    assert.ok(lines.slice(1, 4).every((line: string) => line.startsWith('・') && !line.includes('回')));
+    assert.match(lines[4], /記録1日分/);
+  }
+});
+
 export const sampleJpeg = Uint8Array.from([
   255,216, 255,225,0,6, 1,2,3,4, 255,192,0,11,8,0,1,0,1,1,1,17,0,
   255,218,0,8,1,1,0,0,63,0, 0,255,217,
@@ -264,4 +283,65 @@ test('AI 提案を再利用し、献立が修正された後は古い提案も�
   assert.match(findReply('5'),/簡易案/);
   assert.equal(bot.outbound.filter(call=>call.url.includes('api.openai.com')).length,1);
   assert.equal(bot.sqlite.prepare('SELECT input_tokens FROM usage_attempts').get()!.input_tokens,120);
+});
+
+test('今日の献立は前日までの履歴を使い、AI候補と根拠を短く返信する', async () => {
+  const candidates = [
+    { main: '肉じゃが', side: null, reason_ids: ['recent-2026-11-21', 'freq-1'] },
+    { main: '鶏の照り焼き', side: '温野菜', reason_ids: ['recent-2026-11-21'] },
+  ];
+  const bot = fixture({ fetch: async url => String(url).includes('api.openai.com')
+    ? Response.json({ status: 'completed', output: [{ type: 'message', content: [
+      { type: 'output_text', text: JSON.stringify({ candidates }) },
+    ] }] }) : Response.json({}) });
+  bot.sqlite.prepare('UPDATE group_settings SET suggestions_enabled=1,ai_valid_until_ms=?').run(time + 3600_000);
+  await bot.post([
+    message('past-meal', '晩ごはん 2026-11-21 カレー'),
+    message('same-day-meal', '晩ごはん 豚汁'),
+  ]);
+  await bot.post([message('today-menu', '今日の献立')]);
+
+  const request = bot.outbound.find(call => call.url.includes('api.openai.com'));
+  assert.ok(request, '今日の対象日でOpenAIの呼び出しがない');
+  const input = JSON.parse(request.body.input[0].content[0].text);
+  assert.equal(input.target, '2026-11-22');
+  assert.equal(input.recordedDays, 1);
+  assert.equal(input.facts['recent-2026-11-21'], 'カレー');
+  assert.equal(input.facts['recent-2026-11-22'], undefined);
+
+  const lines = bot.outbound.find(call => call.body?.replyToken === 'reply-today-menu')?.body.messages[0].text.split('\n');
+  assert.deepEqual(lines?.slice(0, 3), ['2026-11-22の晩ごはん候補', '・肉じゃが', '・鶏の照り焼き、温野菜']);
+  assert.equal(lines.length, 4);
+  assert.match(lines[3], /記録1日分.*カレー/);
+});
+
+test('前日に作った同日分のAI提案を日付変更後も再利用する', async () => {
+  const { runSchedule } = await import('../src/scheduled.ts');
+  const bot = fixture({ fetch: async url => String(url).includes('api.openai.com')
+    ? Response.json({ status: 'completed', output: [{ type: 'message', content: [
+      { type: 'output_text', text: JSON.stringify({ candidates: [
+        { main: '肉じゃが', side: null, reason_ids: [] },
+        { main: '鶏の照り焼き', side: '温野菜', reason_ids: [] },
+      ] }) },
+    ] }] }) : Response.json({}) });
+  const midnight = Date.parse('2026-11-23T00:00:00+09:00');
+  const expires = Date.parse('2026-11-24T00:00:00+09:00');
+  bot.sqlite.prepare('UPDATE group_settings SET suggestions_enabled=1,ai_valid_until_ms=?').run(expires);
+  await bot.post([message('meal-for-cache', '晩ごはん カレー')]);
+  await bot.post([message('tomorrow-cache', '明日の献立')]);
+  assert.equal(bot.sqlite.prepare('SELECT expires_at_ms FROM recommendation_cache').get()?.expires_at_ms, expires);
+
+  // 配備前のキャッシュは、対象日が始まる時刻を期限として保存している。
+  bot.sqlite.prepare('UPDATE recommendation_cache SET expires_at_ms=?').run(midnight);
+  const purgeAt = async (now: number) => runSchedule(bot.env as any, {
+    now: () => now, fetcher: async () => { throw new Error('送信は不要'); },
+  }, now);
+  await purgeAt(midnight);
+  await bot.post([{ ...message('today-cache', '今日の献立'), timestamp: midnight }], undefined, midnight + 100);
+  const reply = (id: string) => bot.outbound.find(call => call.body?.replyToken === 'reply-' + id)?.body.messages[0].text;
+  assert.match(reply('today-cache') ?? '', /2026-11-23の晩ごはん候補/);
+  assert.equal(reply('today-cache'), reply('tomorrow-cache'));
+  assert.equal(bot.outbound.filter(call => call.url.includes('api.openai.com')).length, 1);
+  await purgeAt(expires);
+  assert.equal(bot.sqlite.prepare('SELECT COUNT(*) AS count FROM recommendation_cache').get()?.count, 0);
 });

@@ -38,11 +38,13 @@ export type Command =
   | { type: 'register' | 'edit'; date: string; dishes: string[] }
   | { type: 'delete'; date: string }
   | { type: 'photo-confirm'; dishes: string[] | null }
-  | { type: 'history' | 'trends' | 'recommend' | 'photo' | 'photo-cancel' | 'invalid' | 'ignore' };
+  | { type: 'recommend'; daysAhead: 0 | 1 }
+  | { type: 'history' | 'trends' | 'photo' | 'photo-cancel' | 'invalid' | 'ignore' };
 
 const commands = [
   ['晩ごはん修正', 'edit'], ['晩ごはん削除', 'delete'], ['晩ごはん確定', 'photo-confirm'],
-  ['晩ごはん取消', 'photo-cancel'], ['写真で晩ごはん', 'photo'], ['明日の献立', 'recommend'],
+  ['晩ごはん取消', 'photo-cancel'], ['写真で晩ごはん', 'photo'],
+  ['今日の献立', 'recommend'], ['明日の献立', 'recommend'],
   ['献立履歴', 'history'], ['献立傾向', 'trends'], ['晩ごはん', 'register'],
 ] as const;
 
@@ -56,6 +58,7 @@ export function parseCommand(value: string, eventTime: number, now: number): Com
       const dishes = input ? parseDishes(input) : null;
       return input && !dishes ? invalid : { type, dishes };
     }
+    if (type === 'recommend') return input ? invalid : { type, daysAhead: name === '今日の献立' ? 0 : 1 };
     if (type !== 'register' && type !== 'edit' && type !== 'delete') return input ? invalid : { type };
     const [first] = input.split(/[ 　]+/, 1);
     const explicit = type !== 'register' || /^\d{4}-\d/.test(first);

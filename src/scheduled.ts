@@ -56,7 +56,7 @@ async function skip(env: Env, group: Group, target: string, month: string, deadl
 }
 
 async function startDelivery(env: Env, runtime: Runtime, group: Group, date: string, target: string, deadline: number, owner: string, clock: number) {
-  const recommendation = await recommend(env,runtime,group,date,date,deadline);
+  const recommendation = await recommend(env,runtime,group,target,date,deadline);
   const limits = await quota(env,runtime,group.group_id!);
   const now = runtime.now();
   const month = date.slice(0,7);
@@ -154,16 +154,18 @@ export async function runSchedule(env: Env, runtime: Runtime, scheduledTime: num
 
 async function purge(env: Env, now: number, daily: boolean) {
   const db = env.DB;
+  const today = jstDate(now);
   const tasks = [
     db.prepare('DELETE FROM photo_sessions WHERE deadline_ms<=?').bind(now),
-    db.prepare(`DELETE FROM recommendation_cache WHERE expires_at_ms<=? OR NOT EXISTS
+    // Earlier versions stored the start of the target day as the cache deadline.
+    db.prepare(`DELETE FROM recommendation_cache WHERE (expires_at_ms<=? AND (target_date<>? OR expires_at_ms<>?)) OR NOT EXISTS
       (SELECT 1 FROM group_settings g WHERE g.group_id=recommendation_cache.group_id AND g.epoch=recommendation_cache.epoch
-      AND g.history_rev=recommendation_cache.history_rev)`).bind(now),
+      AND g.history_rev=recommendation_cache.history_rev)`).bind(now,today,jstMidnight(today)),
     db.prepare(`UPDATE push_deliveries SET body_json=NULL,state='stopped',last_result='expired'
       WHERE deadline_ms<=? AND state IN ('in_flight','retryable')`).bind(now),
   ];
   if (daily) tasks.push(
-    db.prepare('DELETE FROM meal_days WHERE meal_date<?').bind(shiftDate(jstDate(now),-364)),
+    db.prepare('DELETE FROM meal_days WHERE meal_date<?').bind(shiftDate(today,-364)),
     db.prepare('DELETE FROM webhook_events WHERE expires_at_ms<=?').bind(now),
     db.prepare('DELETE FROM unsent_messages WHERE expires_at_ms<=?').bind(now),
     db.prepare('DELETE FROM group_claim WHERE expires_at_ms<=? AND used_at_ms IS NULL').bind(now),

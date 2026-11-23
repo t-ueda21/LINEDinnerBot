@@ -1,4 +1,4 @@
-import { DAY, MINUTE, jstDate, parseCommand } from './domain.ts';
+import { DAY, MINUTE, jstDate, parseCommand, shiftDate } from './domain.ts';
 import { type Env, type Runtime, digest, hmacKey, identifier, limitedBytes, runtime } from './environment.ts';
 import { sendReply } from './line.ts';
 import { cancelPhoto, claimPhoto, finishPhoto, recognizePhoto, startPhoto } from './photo-session.ts';
@@ -143,9 +143,10 @@ export async function handleWebhook(
           ctx.waitUntil((async () => {
             try {
               if (command.type === 'recommend') {
-                const proposed = await recommend(env,services,group,date,today,deadline);
+                const target = shiftDate(date, command.daysAhead);
+                const proposed = await recommend(env,services,group,target,today,deadline);
                 const current = await getGroup(env.DB);
-                const answer = current?.history_rev === proposed.rev ? proposed : await simpleRecommendation(env,group,date,today);
+                const answer = current?.history_rev === proposed.rev ? proposed : await simpleRecommendation(env,group,target,today);
                 await sendReply(env,services,event,answer.text,deadline,{ revision: answer.rev });
               } else {
                 const snapshot = await readHistory(env,group,date,today);
